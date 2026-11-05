@@ -1,0 +1,14 @@
+name: FarmTycoon
+version: 1.0
+main: id.farmtycoon.FarmTycoon
+api-version: "1.21"
+commands:
+  farm:
+    description: Teleport ke pulau farm kamu
+  sell:
+    description: Jual semua hasil panen di inventory
+  balance:
+    description: Cek uang kamu
+    aliases: [bal]
+  upgrade:
+    description: Perluas pulau farm kamu

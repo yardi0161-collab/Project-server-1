@@ -1,0 +1,13 @@
+# Harga jual per item (pakai nama Material Minecraft)
+prices:
+  WHEAT: 3
+  CARROT: 2
+  POTATO: 2
+  BEETROOT: 3
+  MELON_SLICE: 1
+  PUMPKIN: 5
+  SWEET_BERRIES: 2
+  NETHER_WART: 6
+
+# Biaya upgrade = upgrade-base-cost x level sekarang
+upgrade-base-cost: 500
