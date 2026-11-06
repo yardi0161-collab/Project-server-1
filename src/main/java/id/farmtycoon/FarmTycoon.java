@@ -8,9 +8,14 @@ import org.bukkit.command.*;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Villager;
+import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -32,10 +37,11 @@ public class FarmTycoon extends JavaPlugin implements Listener {
             Material.DANDELION, Material.POPPY, Material.CORNFLOWER,
             Material.AZURE_BLUET, Material.OXEYE_DAISY};
 
-    private World world;
     private File dataFile;
     private YamlConfiguration data;
     private final Map<Material, Double> prices = new HashMap<>();
+    private NamespacedKey npcKey;
+    private final Set<String> farmWorlds = new HashSet<>(); // nama world pulau (huruf kecil)
 
     /** Generator dunia kosong (void) */
     public static class VoidGen extends ChunkGenerator {
@@ -48,16 +54,19 @@ public class FarmTycoon extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        npcKey = new NamespacedKey(this, "farmer_npc");
         loadPrices();
         dataFile = new File(getDataFolder(), "data.yml");
         data = YamlConfiguration.loadConfiguration(dataFile);
-        world = new WorldCreator("farmworld").generator(new VoidGen()).createWorld();
+        for (String n : data.getStringList("worlds")) farmWorlds.add(n.toLowerCase());
         getServer().getPluginManager().registerEvents(this, this);
 
         // Kalau pemain jatuh ke void, balikin ke pulaunya
         Bukkit.getScheduler().runTaskTimer(this, () -> {
-            for (Player p : world.getPlayers()) {
-                if (hasIsland(p) && p.getLocation().getY() < Y - 20) p.teleport(home(p));
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                if (isFarmWorld(p.getWorld()) && hasIsland(p) && p.getLocation().getY() < Y - 20) {
+                    p.teleport(home(p));
+                }
             }
         }, 20L, 20L);
     }
@@ -84,28 +93,50 @@ public class FarmTycoon extends JavaPlugin implements Listener {
     }
 
     private String path(Player p, String key) { return "players." + p.getUniqueId() + "." + key; }
-    private boolean hasIsland(Player p) { return data.contains(path(p, "island")); }
+    private boolean hasIsland(Player p) { return data.contains(path(p, "world")); }
+    private boolean isFarmWorld(World w) { return farmWorlds.contains(w.getName().toLowerCase()); }
     private int level(Player p) { return data.getInt(path(p, "level"), 1); }
     private double money(Player p) { return data.getDouble(path(p, "money"), 0); }
     private void setMoney(Player p, double v) { data.set(path(p, "money"), v); }
 
     // ---------- Pulau ----------
 
-    private Location center(int idx) {
-        return new Location(world, (idx % 100) * SPACING + 0.5, Y + 1, (idx / 100) * SPACING + 0.5);
+    /** Setiap pemain punya world sendiri, namanya sesuai nama pemain. */
+    private World loadWorld(String name) {
+        World w = Bukkit.getWorld(name);
+        if (w == null) {
+            w = new WorldCreator(name).generator(new VoidGen()).createWorld();
+        }
+        return w;
     }
 
     private Location home(Player p) {
-        return center(data.getInt(path(p, "island")));
+        World w = loadWorld(data.getString(path(p, "world")));
+        return new Location(w, 0.5, Y + 1, 0.5);
+    }
+
+    /** Nama world = nama pemain (karakter aneh diganti _, kalau bentrok ditambah angka). */
+    private String pickWorldName(Player p) {
+        String base = p.getName().replaceAll("[^A-Za-z0-9_]", "_");
+        String name = base;
+        int n = 2;
+        while (farmWorlds.contains(name.toLowerCase())
+                || Bukkit.getWorld(name) != null
+                || new File(Bukkit.getWorldContainer(), name).exists()) {
+            name = base + "_" + n++;
+        }
+        return name;
     }
 
     private void createIsland(Player p) {
-        int idx = data.getInt("next-island", 0);
-        data.set("next-island", idx + 1);
-        data.set(path(p, "island"), idx);
+        String name = pickWorldName(p);
+        farmWorlds.add(name.toLowerCase());
+        data.set("worlds", new ArrayList<>(farmWorlds));
+        data.set(path(p, "world"), name);
         data.set(path(p, "level"), 1);
         data.set(path(p, "money"), 0.0);
-        buildIsland(idx, 1, true);
+        World w = loadWorld(name);
+        buildIsland(w, 1, true);
         saveData();
 
         p.getInventory().addItem(
@@ -142,9 +173,8 @@ public class FarmTycoon extends JavaPlugin implements Listener {
      * fresh = true  : pulau baru (bangun semuanya + dekorasi)
      * fresh = false : upgrade (hanya menambah tanah baru & petak lahan baru, tanaman aman)
      */
-    private void buildIsland(int idx, int level, boolean fresh) {
-        Location c = center(idx);
-        int cx = c.getBlockX(), cz = c.getBlockZ();
+    private void buildIsland(World world, int level, boolean fresh) {
+        int cx = 0, cz = 0;
         double R = islandRadius(level);
         int max = (int) Math.ceil(R) + 2;
 
@@ -174,12 +204,12 @@ public class FarmTycoon extends JavaPlugin implements Listener {
             }
         }
 
-        if (fresh) decorate(cx, cz);
-        buildTile(cx, cz, level - 1);
+        if (fresh) decorate(world, cx, cz);
+        buildTile(world, cx, cz, level - 1);
     }
 
     /** Satu petak lahan 7x7: tengahnya air, sisanya farmland basah. */
-    private void buildTile(int cx, int cz, int t) {
+    private void buildTile(World world, int cx, int cz, int t) {
         if (t < 0 || t >= TILES.length) return;
         int x0 = cx + 3 + 7 * TILES[t][0];
         int z0 = cz - 3 + 7 * TILES[t][1];
@@ -201,7 +231,7 @@ public class FarmTycoon extends JavaPlugin implements Listener {
     }
 
     /** Pohon, kolam, api unggun, rumput & bunga. Sama persis untuk setiap pulau. */
-    private void decorate(int cx, int cz) {
+    private void decorate(World world, int cx, int cz) {
         // Pohon besar
         int tx = cx - 6, tz = cz - 5;
         world.getBlockAt(tx, Y, tz).setType(Material.DIRT, false);
@@ -235,6 +265,9 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         world.getBlockAt(cx - 4, Y + 1, cz + 3).setType(Material.HAY_BLOCK, false);
         world.getBlockAt(cx - 3, Y + 1, cz + 4).setType(Material.HAY_BLOCK, false);
 
+        // NPC Farmer di bawah pohon
+        spawnFarmer(world, cx, cz);
+
         // Rumput & bunga (tidak di tempat spawn dan area lahan)
         for (int dx = -13; dx <= 13; dx++) {
             for (int dz = -13; dz <= 13; dz++) {
@@ -255,13 +288,56 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         }
     }
 
+    /** NPC petani di bawah pohon (tidak bergerak, tidak bisa dibunuh). Klik kanan = jual panen. */
+    private void spawnFarmer(World world, int cx, int cz) {
+        world.getBlockAt(cx - 5, Y + 1, cz - 5).setType(Material.AIR, false);
+        Location loc = new Location(world, cx - 5 + 0.5, Y + 1, cz - 5 + 0.5, -90f, 0f);
+        String name = getConfig().getString("npc-name", "Farmer iaann");
+        world.spawn(loc, Villager.class, v -> {
+            v.setProfession(Villager.Profession.FARMER);
+            v.setCustomName("§a" + name);
+            v.setCustomNameVisible(true);
+            v.setAI(false);
+            v.setInvulnerable(true);
+            v.setSilent(true);
+            v.setPersistent(true);
+            v.setRemoveWhenFarAway(false);
+            v.getPersistentDataContainer().set(npcKey, PersistentDataType.BYTE, (byte) 1);
+        });
+    }
+
     // ---------- Event ----------
+
+    @EventHandler
+    public void onNpcClick(PlayerInteractEntityEvent e) {
+        if (!(e.getRightClicked() instanceof Villager v)) return;
+        if (!v.getPersistentDataContainer().has(npcKey, PersistentDataType.BYTE)) return;
+        e.setCancelled(true); // jangan buka menu trading bawaan villager
+        sell(e.getPlayer());
+    }
 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
         Player p = e.getPlayer();
         if (!hasIsland(p)) createIsland(p);
         p.teleport(home(p));
+    }
+
+    // Bongkar world pemain yang sudah keluar supaya RAM hemat
+    @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        World w = e.getPlayer().getWorld();
+        if (!isFarmWorld(w)) return;
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (w.getPlayers().isEmpty()) Bukkit.unloadWorld(w, true);
+        }, 40L);
+    }
+
+    // Kalau mati, respawn di pulau sendiri
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent e) {
+        Player p = e.getPlayer();
+        if (hasIsland(p)) e.setRespawnLocation(home(p));
     }
 
     // ---------- Command ----------
@@ -318,8 +394,8 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         }
         setMoney(p, money(p) - cost);
         data.set(path(p, "level"), lvl + 1);
-        buildIsland(data.getInt(path(p, "island")), lvl + 1, false);
+        buildIsland(loadWorld(data.getString(path(p, "world"))), lvl + 1, false);
         saveData();
         p.sendMessage("§aPulau naik ke level " + (lvl + 1) + "! Lahan baru terbuka.");
     }
-                  }
+}
