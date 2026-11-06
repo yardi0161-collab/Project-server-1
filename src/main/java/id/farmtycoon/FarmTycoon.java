@@ -4,20 +4,23 @@ import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.data.type.Farmland;
 import org.bukkit.block.data.type.Leaves;
+import org.bukkit.boss.BarColor;
+import org.bukkit.boss.BarStyle;
+import org.bukkit.boss.BossBar;
 import org.bukkit.command.*;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Villager;
-import org.bukkit.event.player.PlayerInteractEntityEvent;
-import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
@@ -27,7 +30,6 @@ import java.util.*;
 public class FarmTycoon extends JavaPlugin implements Listener {
 
     private static final int Y = 64;          // tinggi permukaan pulau
-    private static final int SPACING = 256;   // jarak antar pulau
     private static final int MAX_LEVEL = 6;   // level maksimal
 
     // Urutan petak lahan (tile 7x7). Tiap level membuka 1 petak baru.
@@ -37,11 +39,28 @@ public class FarmTycoon extends JavaPlugin implements Listener {
             Material.DANDELION, Material.POPPY, Material.CORNFLOWER,
             Material.AZURE_BLUET, Material.OXEYE_DAISY};
 
+    private World lobby;
     private File dataFile;
     private YamlConfiguration data;
-    private final Map<Material, Double> prices = new HashMap<>();
     private NamespacedKey npcKey;
     private final Set<String> farmWorlds = new HashSet<>(); // nama world pulau (huruf kecil)
+
+    // Harga
+    private static class Crop {
+        double min, max, up, down, cur, last;
+    }
+
+    private static final String[] DEFAULT_CROPS = {
+            "WHEAT:3:1.5:5:0.2:0.15", "CARROT:2:1:3.2:0.12:0.1", "POTATO:2:1:3.2:0.12:0.08",
+            "BEETROOT:3:1.5:5:0.2:0.15", "MELON_SLICE:1:0.5:2:0.08:0.06", "PUMPKIN:5:2.5:8:0.3:0.25",
+            "SWEET_BERRIES:2:1:3:0.1:0.08", "SUGAR_CANE:2:1:3:0.1:0.08",
+            "TORCHFLOWER:8:4:12:0.5:0.4", "PITCHER_PLANT:10:5:15:0.6:0.5"};
+
+    private final Map<Material, Crop> crops = new LinkedHashMap<>();
+    private final Map<Material, Double> seedPrices = new LinkedHashMap<>();
+    private final Random rng = new Random();
+    private long nextChange;
+    private BossBar bar;
 
     /** Generator dunia kosong (void) */
     public static class VoidGen extends ChunkGenerator {
@@ -55,11 +74,29 @@ public class FarmTycoon extends JavaPlugin implements Listener {
     public void onEnable() {
         saveDefaultConfig();
         npcKey = new NamespacedKey(this, "farmer_npc");
-        loadPrices();
         dataFile = new File(getDataFolder(), "data.yml");
         data = YamlConfiguration.loadConfiguration(dataFile);
         for (String n : data.getStringList("worlds")) farmWorlds.add(n.toLowerCase());
+        loadPrices();
+        loadMarket();
+
+        lobby = loadLobby();
         getServer().getPluginManager().registerEvents(this, this);
+
+        // Bar waktu perubahan harga di atas layar
+        bar = Bukkit.createBossBar("", BarColor.YELLOW, BarStyle.SEGMENTED_10);
+        for (Player p : Bukkit.getOnlinePlayers()) bar.addPlayer(p);
+
+        // Tiap detik: cek perubahan harga + update bar
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            long now = System.currentTimeMillis();
+            if (now >= nextChange) {
+                rollPrices(true);
+                nextChange = now + intervalMillis();
+                saveMarket();
+            }
+            updateBar(now);
+        }, 20L, 20L);
 
         // Kalau pemain jatuh ke void, balikin ke pulaunya
         Bukkit.getScheduler().runTaskTimer(this, () -> {
@@ -73,20 +110,164 @@ public class FarmTycoon extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
-        if (data != null) saveData();
+        if (bar != null) bar.removeAll();
+        if (data != null) saveMarket();
+    }
+
+    // ---------- Lobby ----------
+
+    private World loadLobby() {
+        World w = Bukkit.getWorld("lobby");
+        if (w == null) {
+            w = new WorldCreator("lobby").type(WorldType.FLAT).generateStructures(false).createWorld();
+        }
+        if (w != null) {
+            w.setDifficulty(Difficulty.PEACEFUL);
+            w.setSpawnLocation(0, w.getHighestBlockYAt(0, 0) + 1, 0);
+        }
+        return w;
+    }
+
+    private Location lobbySpawn() {
+        return new Location(lobby, 0.5, lobby.getHighestBlockYAt(0, 0) + 1, 0.5);
+    }
+
+    // ---------- Harga ----------
+
+    private long intervalMillis() {
+        return Math.max(1, getConfig().getLong("price-change.interval-minutes", 15)) * 60_000L;
+    }
+
+    private static double round2(double v) {
+        return Math.round(v * 100) / 100.0;
+    }
+
+    private static String fmt(double v) {
+        return String.format(Locale.US, "%.2f", v);
+    }
+
+    private void readSeeds() {
+        seedPrices.clear();
+        ConfigurationSection sec = getConfig().getConfigurationSection("seeds");
+        if (sec != null) {
+            for (String key : sec.getKeys(false)) {
+                Material m = Material.matchMaterial(key);
+                if (m != null) seedPrices.put(m, sec.getDouble(key));
+            }
+        }
+        if (seedPrices.isEmpty()) {
+            String[] d = {"WHEAT_SEEDS:2", "CARROT:4", "POTATO:4", "BEETROOT_SEEDS:3", "MELON_SEEDS:8",
+                    "PUMPKIN_SEEDS:10", "SWEET_BERRIES:5", "SUGAR_CANE:5", "TORCHFLOWER_SEEDS:12", "PITCHER_POD:15"};
+            for (String x : d) {
+                String[] a = x.split(":");
+                Material m = Material.matchMaterial(a[0]);
+                if (m != null) seedPrices.put(m, Double.parseDouble(a[1]));
+            }
+        }
+    }
+
+    private void addCrop(Material m, double base, double min, double max, double up, double down) {
+        Crop c = new Crop();
+        c.min = min;
+        c.max = max;
+        // Cegah curang: harga jual tidak boleh melebihi harga beli benih yang sama
+        Double sp = seedPrices.get(m);
+        if (sp != null) c.max = Math.min(c.max, sp - 0.01);
+        if (c.max < c.min) c.min = c.max;
+        c.up = Math.max(0.01, up);
+        c.down = Math.max(0.01, down);
+        c.cur = round2(Math.max(c.min, Math.min(c.max, base)));
+        c.last = c.cur;
+        crops.put(m, c);
+    }
+
+    private void loadPrices() {
+        readSeeds();
+        crops.clear();
+        ConfigurationSection sec = getConfig().getConfigurationSection("prices");
+        if (sec != null) {
+            for (String key : sec.getKeys(false)) {
+                Material m = Material.matchMaterial(key);
+                if (m == null) continue;
+                ConfigurationSection c = sec.getConfigurationSection(key);
+                double base = c != null ? c.getDouble("sell", 1) : sec.getDouble(key, 1);
+                addCrop(m, base,
+                        c != null ? c.getDouble("min", base * 0.5) : base * 0.5,
+                        c != null ? c.getDouble("max", base * 1.6) : base * 1.6,
+                        c != null ? c.getDouble("up", base * 0.08) : base * 0.08,
+                        c != null ? c.getDouble("down", base * 0.08) : base * 0.08);
+            }
+        }
+        if (crops.isEmpty()) {
+            for (String d : DEFAULT_CROPS) {
+                String[] a = d.split(":");
+                Material m = Material.matchMaterial(a[0]);
+                if (m == null) continue;
+                addCrop(m, Double.parseDouble(a[1]), Double.parseDouble(a[2]), Double.parseDouble(a[3]),
+                        Double.parseDouble(a[4]), Double.parseDouble(a[5]));
+            }
+        }
+    }
+
+    /** Ambil harga terakhir & waktu perubahan dari data.yml supaya restart tidak mereset harga. */
+    private void loadMarket() {
+        for (Map.Entry<Material, Crop> en : crops.entrySet()) {
+            Crop c = en.getValue();
+            String k = "market.prices." + en.getKey().name();
+            if (data.contains(k + ".cur")) {
+                c.cur = round2(Math.max(c.min, Math.min(c.max, data.getDouble(k + ".cur"))));
+                c.last = round2(Math.max(c.min, Math.min(c.max, data.getDouble(k + ".last", c.cur))));
+            }
+        }
+        long now = System.currentTimeMillis();
+        nextChange = data.getLong("market.next-change", 0);
+        if (nextChange == 0 || nextChange > now + intervalMillis()) nextChange = now + intervalMillis();
+    }
+
+    private void saveMarket() {
+        for (Map.Entry<Material, Crop> en : crops.entrySet()) {
+            String k = "market.prices." + en.getKey().name();
+            data.set(k + ".cur", en.getValue().cur);
+            data.set(k + ".last", en.getValue().last);
+        }
+        data.set("market.next-change", nextChange);
+        saveData();
+    }
+
+    /** Harga naik atau turun dalam dolar (bukan kali lipat). */
+    private void rollPrices(boolean announce) {
+        for (Crop c : crops.values()) {
+            c.last = c.cur;
+            boolean up = rng.nextBoolean();
+            double step = up ? c.up : c.down;
+            double amt = round2(0.01 + rng.nextDouble() * Math.max(0, step - 0.01));
+            double nv = c.cur + (up ? amt : -amt);
+            if (nv > c.max || nv < c.min) nv = c.cur + (up ? -amt : amt); // mentok batas -> balik arah
+            c.cur = round2(Math.max(c.min, Math.min(c.max, nv)));
+        }
+        if (announce) {
+            Bukkit.broadcastMessage("§6[Pasar] §eHarga tanaman berubah! Ketik §f/price §euntuk melihat.");
+        }
+    }
+
+    private void updateBar(long now) {
+        long interval = intervalMillis();
+        long remain = Math.max(0, nextChange - now);
+        long sec = remain / 1000L;
+        bar.setTitle(String.format("§6Harga tanaman berubah dalam §f%d:%02d", sec / 60, sec % 60));
+        bar.setProgress(Math.max(0.0, Math.min(1.0, (double) remain / interval)));
+        bar.setColor(sec < 60 ? BarColor.RED : BarColor.YELLOW);
+    }
+
+    private double sellPrice(Material m) {
+        return crops.get(m).cur;
+    }
+
+    private String pretty(Material m) {
+        return m.name().toLowerCase().replace('_', ' ');
     }
 
     // ---------- Data ----------
-
-    private void loadPrices() {
-        prices.clear();
-        ConfigurationSection sec = getConfig().getConfigurationSection("prices");
-        if (sec == null) return;
-        for (String key : sec.getKeys(false)) {
-            Material m = Material.matchMaterial(key);
-            if (m != null) prices.put(m, sec.getDouble(key));
-        }
-    }
 
     private void saveData() {
         try { data.save(dataFile); } catch (IOException e) { e.printStackTrace(); }
@@ -230,7 +411,7 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         }
     }
 
-    /** Pohon, kolam, api unggun, rumput & bunga. Sama persis untuk setiap pulau. */
+    /** Pohon, kolam, api unggun, NPC, rumput & bunga. Sama persis untuk setiap pulau. */
     private void decorate(World world, int cx, int cz) {
         // Pohon besar
         int tx = cx - 6, tz = cz - 5;
@@ -316,16 +497,19 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         sell(e.getPlayer());
     }
 
+    // Awal masuk server: ke lobby (world datar), pulau dibuat lewat /farm
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
         Player p = e.getPlayer();
-        if (!hasIsland(p)) createIsland(p);
-        p.teleport(home(p));
+        if (bar != null) bar.addPlayer(p);
+        p.teleport(lobbySpawn());
+        p.sendMessage("§aSelamat datang! Ketik §e/farm §auntuk masuk ke pulau farm kamu.");
     }
 
     // Bongkar world pemain yang sudah keluar supaya RAM hemat
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
+        if (bar != null) bar.removePlayer(e.getPlayer());
         World w = e.getPlayer().getWorld();
         if (!isFarmWorld(w)) return;
         Bukkit.getScheduler().runTaskLater(this, () -> {
@@ -333,11 +517,12 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         }, 40L);
     }
 
-    // Kalau mati, respawn di pulau sendiri
+    // Kalau mati di pulau, respawn di pulau; selain itu di lobby
     @EventHandler
     public void onRespawn(PlayerRespawnEvent e) {
         Player p = e.getPlayer();
-        if (hasIsland(p)) e.setRespawnLocation(home(p));
+        if (isFarmWorld(p.getWorld()) && hasIsland(p)) e.setRespawnLocation(home(p));
+        else e.setRespawnLocation(lobbySpawn());
     }
 
     // ---------- Command ----------
@@ -350,15 +535,72 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         }
         switch (cmd.getName().toLowerCase()) {
             case "farm" -> {
-                if (!hasIsland(p)) createIsland(p);
+                if (!hasIsland(p)) {
+                    p.sendMessage("§eMembuat pulau kamu, tunggu sebentar...");
+                    createIsland(p);
+                }
                 p.teleport(home(p));
                 p.sendMessage("§aTeleport ke pulau farm kamu!");
+            }
+            case "lobby" -> {
+                p.teleport(lobbySpawn());
+                p.sendMessage("§aKembali ke lobby.");
             }
             case "balance" -> p.sendMessage("§eUang: §f$" + String.format("%.1f", money(p)));
             case "sell" -> sell(p);
             case "upgrade" -> upgrade(p);
+            case "price" -> showPrices(p);
+            case "buy" -> buy(p, args);
         }
         return true;
+    }
+
+    private void showPrices(Player p) {
+        p.sendMessage("§6=== Harga Jual Tanaman ===");
+        for (Map.Entry<Material, Crop> en : crops.entrySet()) {
+            Crop c = en.getValue();
+            double d = c.cur - c.last;
+            String t = d > 0.001 ? "§a▲ +$" + fmt(d) : d < -0.001 ? "§c▼ -$" + fmt(-d) : "§7- $0.00";
+            p.sendMessage("§f" + pretty(en.getKey()) + ": §e$" + fmt(c.cur) + " " + t);
+        }
+        long sec = Math.max(0, (nextChange - System.currentTimeMillis()) / 1000L);
+        p.sendMessage("§7Harga berubah lagi dalam " + (sec / 60) + ":" + String.format("%02d", sec % 60));
+    }
+
+    private void buy(Player p, String[] args) {
+        if (args.length == 0) {
+            p.sendMessage("§6=== Toko Benih ===");
+            for (Map.Entry<Material, Double> en : seedPrices.entrySet()) {
+                p.sendMessage("§f" + pretty(en.getKey()) + ": §e$" + String.format("%.1f", en.getValue()));
+            }
+            p.sendMessage("§7Beli dengan: /buy <nama> [jumlah]");
+            return;
+        }
+        String q = args[0].toLowerCase();
+        Material found = null;
+        for (Material m : seedPrices.keySet()) {
+            if (m.name().toLowerCase().contains(q)) { found = m; break; }
+        }
+        if (found == null) {
+            p.sendMessage("§cBenih tidak ditemukan. Ketik /buy untuk melihat daftar.");
+            return;
+        }
+        int amount = 1;
+        if (args.length > 1) {
+            try { amount = Integer.parseInt(args[1]); }
+            catch (NumberFormatException ex) { p.sendMessage("§cJumlah harus berupa angka."); return; }
+        }
+        amount = Math.max(1, Math.min(amount, 64));
+        double cost = seedPrices.get(found) * amount;
+        if (money(p) < cost) {
+            p.sendMessage("§cUang kurang. Butuh $" + String.format("%.1f", cost));
+            return;
+        }
+        setMoney(p, money(p) - cost);
+        Map<Integer, ItemStack> left = p.getInventory().addItem(new ItemStack(found, amount));
+        for (ItemStack it : left.values()) p.getWorld().dropItemNaturally(p.getLocation(), it);
+        saveData();
+        p.sendMessage("§aBeli " + amount + " " + pretty(found) + " seharga $" + String.format("%.1f", cost));
     }
 
     private void sell(Player p) {
@@ -367,9 +609,8 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         for (int i = 0; i < items.length; i++) {
             ItemStack it = items[i];
             if (it == null) continue;
-            Double price = prices.get(it.getType());
-            if (price == null) continue;
-            total += price * it.getAmount();
+            if (!crops.containsKey(it.getType())) continue;
+            total += sellPrice(it.getType()) * it.getAmount();
             p.getInventory().setItem(i, null);
         }
         if (total <= 0) {
@@ -378,10 +619,14 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         }
         setMoney(p, money(p) + total);
         saveData();
-        p.sendMessage("§aTerjual! +$" + String.format("%.1f", total));
+        p.sendMessage("§aTerjual! +$" + fmt(total));
     }
 
     private void upgrade(Player p) {
+        if (!hasIsland(p)) {
+            p.sendMessage("§cKamu belum punya pulau. Ketik /farm dulu.");
+            return;
+        }
         int lvl = level(p);
         if (lvl >= MAX_LEVEL) {
             p.sendMessage("§eLevel pulau sudah maksimal!");
