@@ -83,5 +83,10 @@ seeds:
 price-change:
   interval-minutes: 15
 
-# Biaya upgrade = upgrade-base-cost x level sekarang
-upgrade-base-cost: 500
+# Biaya upgrade pulau (level 1 gratis, otomatis saat pulau dibuat)
+upgrade:
+  costs:
+    2: 100000
+    3: 500000
+    4: 1000000
+    5: 2000000

@@ -4,7 +4,10 @@ main: id.farmtycoon.FarmTycoon
 api-version: "1.21"
 commands:
   farm:
-    description: Teleport ke pulau farm kamu
+    description: Masuk ke pulau farm kamu (dibuat otomatis kalau belum punya)
+  lobby:
+    description: Kembali ke lobby / spawn
+    aliases: [spawn, hub]
   sell:
     description: Jual semua hasil panen di inventory
   balance:
@@ -12,3 +15,9 @@ commands:
     aliases: [bal]
   upgrade:
     description: Perluas pulau farm kamu
+  price:
+    description: Lihat harga jual tanaman saat ini
+    aliases: [harga]
+  buy:
+    description: Beli benih tanaman
+    aliases: [beli]
