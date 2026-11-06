@@ -1,13 +1,87 @@
-# Harga jual per item (pakai nama Material Minecraft)
+# Nama NPC petani di tiap pulau
+npc-name: "Farmer iaann"
+
+# Harga JUAL tanaman (dalam dolar).
+# sell = harga awal, min/max = batas harga,
+# up = kenaikan terbesar sekali ganti, down = penurunan terbesar sekali ganti
 prices:
-  WHEAT: 3
-  CARROT: 2
-  POTATO: 2
-  BEETROOT: 3
-  MELON_SLICE: 1
-  PUMPKIN: 5
-  SWEET_BERRIES: 2
-  NETHER_WART: 6
+  WHEAT:
+    sell: 3.0
+    min: 1.5
+    max: 5.0
+    up: 0.20
+    down: 0.15
+  CARROT:
+    sell: 2.0
+    min: 1.0
+    max: 3.2
+    up: 0.12
+    down: 0.10
+  POTATO:
+    sell: 2.0
+    min: 1.0
+    max: 3.2
+    up: 0.12
+    down: 0.08
+  BEETROOT:
+    sell: 3.0
+    min: 1.5
+    max: 5.0
+    up: 0.20
+    down: 0.15
+  MELON_SLICE:
+    sell: 1.0
+    min: 0.5
+    max: 2.0
+    up: 0.08
+    down: 0.06
+  PUMPKIN:
+    sell: 5.0
+    min: 2.5
+    max: 8.0
+    up: 0.30
+    down: 0.25
+  SWEET_BERRIES:
+    sell: 2.0
+    min: 1.0
+    max: 3.0
+    up: 0.10
+    down: 0.08
+  SUGAR_CANE:
+    sell: 2.0
+    min: 1.0
+    max: 3.0
+    up: 0.10
+    down: 0.08
+  TORCHFLOWER:
+    sell: 8.0
+    min: 4.0
+    max: 12.0
+    up: 0.50
+    down: 0.40
+  PITCHER_PLANT:
+    sell: 10.0
+    min: 5.0
+    max: 15.0
+    up: 0.60
+    down: 0.50
+
+# Harga BELI benih (/buy)
+seeds:
+  WHEAT_SEEDS: 2
+  CARROT: 4
+  POTATO: 4
+  BEETROOT_SEEDS: 3
+  MELON_SEEDS: 8
+  PUMPKIN_SEEDS: 10
+  SWEET_BERRIES: 5
+  SUGAR_CANE: 5
+  TORCHFLOWER_SEEDS: 12
+  PITCHER_POD: 15
+
+# Harga jual berubah otomatis
+price-change:
+  interval-minutes: 15
 
 # Biaya upgrade = upgrade-base-cost x level sekarang
 upgrade-base-cost: 500
