@@ -363,6 +363,7 @@ public class FarmTycoon extends JavaPlugin implements Listener {
 
     private Location home(Player p) {
         World w = loadWorld(data.getString(path(p, "world")));
+        applyBorder(w, level(p), false);
         return new Location(w, 0.5, Y + 1, 0.5);
     }
 
@@ -388,6 +389,7 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         if (!data.contains(path(p, "money"))) data.set(path(p, "money"), 0.0);
         World w = loadWorld(name);
         buildIsland(w, 1, true);
+        applyBorder(w, 1, false);
         saveData();
 
         p.getInventory().addItem(
@@ -404,6 +406,18 @@ public class FarmTycoon extends JavaPlugin implements Listener {
         Random r = new Random(seed);
         r.nextDouble();
         return r.nextDouble();
+    }
+
+    /** Border dunia (dinding biru) mengikuti ukuran pulau sesuai level. */
+    private void applyBorder(World w, int level, boolean animate) {
+        int lv = Math.max(1, Math.min(MAX_LEVEL, level));
+        double size = SIZES[lv - 1] * 2 + 1;
+        WorldBorder wb = w.getWorldBorder();
+        wb.setCenter(0.5, 0.5);
+        wb.setDamageAmount(0);
+        wb.setWarningDistance(2);
+        if (animate) wb.setSize(size, 3L); // melebar pelan selama 3 detik
+        else wb.setSize(size);
     }
 
     /**
@@ -920,6 +934,7 @@ public class FarmTycoon extends JavaPlugin implements Listener {
             setMoney(p, money(p) - cost);
             data.set(path(p, "level"), n);
             saveData();
+            applyBorder(loadWorld(data.getString(path(p, "world"))), n, true);
         }
 
         p.sendMessage("§a§lUPGRADE PULAU BERHASIL");
